@@ -1,22 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2013-2017 The Meson development team
-
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # This file contains the detection logic for external dependencies that
 # are UI-related.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import typing as T
 
@@ -77,7 +67,7 @@ class GnuStepDependency(ConfigToolDependency):
             ['--gui-libs' if 'gui' in self.modules else '--base-libs'],
             'link_args'))
 
-    def find_config(self, versions: T.Optional[T.List[str]] = None, returncode: int = 0) -> T.Tuple[T.Optional[T.List[str]], T.Optional[str]]:
+    def find_config(self, versions: T.Optional[T.List[str]] = None, returncode: int = 0, exclude_paths: T.Optional[T.List[str]] = None) -> T.Tuple[T.Optional[T.List[str]], T.Optional[str]]:
         tool = [self.tools[0]]
         try:
             p, out = Popen_safe(tool + ['--help'])[:2]
@@ -198,7 +188,7 @@ class VulkanDependencySystem(SystemDependency):
         super().__init__(name, environment, kwargs, language=language)
 
         try:
-            self.vulkan_sdk = os.environ['VULKAN_SDK']
+            self.vulkan_sdk = os.environ.get('VULKAN_SDK', os.environ['VK_SDK_PATH'])
             if not os.path.isabs(self.vulkan_sdk):
                 raise DependencyException('VULKAN_SDK must be an absolute path.')
         except KeyError:
@@ -235,10 +225,6 @@ class VulkanDependencySystem(SystemDependency):
             self.compile_args.append('-I' + inc_path)
             self.link_args.append('-L' + lib_path)
             self.link_args.append('-l' + lib_name)
-
-            # TODO: find a way to retrieve the version from the sdk?
-            # Usually it is a part of the path to it (but does not have to be)
-            return
         else:
             # simply try to guess it, usually works on linux
             libs = self.clib_compiler.find_library('vulkan', environment, [])
@@ -246,7 +232,30 @@ class VulkanDependencySystem(SystemDependency):
                 self.is_found = True
                 for lib in libs:
                     self.link_args.append(lib)
-                return
+
+        if self.is_found:
+            try:
+                # VK_VERSION_* is deprecated and replaced by VK_API_VERSION_*. We'll continue to use the old one in
+                # order to support older Vulkan versions that don't have the new one yet, but we might have to update
+                # this code to also check VK_API_VERSION in the future if they decide to drop the old one at some point.
+                components = [str(self.clib_compiler.compute_int(f'VK_VERSION_{c}(VK_HEADER_VERSION_COMPLETE)',
+                                                                 low=0, high=None, guess=e,
+                                                                 prefix='#include <vulkan/vulkan.h>',
+                                                                 env=environment,
+                                                                 extra_args=None,
+                                                                 dependencies=None))
+                              # list containing vulkan version components and their expected value
+                              for c, e in [('MAJOR', 1), ('MINOR', 3), ('PATCH', None)]]
+                self.version = '.'.join(components)
+            except mesonlib.EnvironmentException:
+                if self.vulkan_sdk:
+                    # fall back to heuristics: detect version number in path
+                    # matches the default install path on Windows
+                    match = re.search(rf'VulkanSDK{re.escape(os.path.sep)}([0-9]+(?:\.[0-9]+)+)', self.vulkan_sdk)
+                    if match:
+                        self.version = match.group(1)
+                    else:
+                        mlog.warning(f'Environment variable VULKAN_SDK={self.vulkan_sdk} is present, but Vulkan version could not be extracted.')
 
 packages['gl'] = gl_factory = DependencyFactory(
     'gl',
